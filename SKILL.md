@@ -1,121 +1,132 @@
 ---
 name: douyin-product-images
-description: 从抖音商品分享链接（v.douyin.com 短链 / haohuo.jinritemai.com 商品页）批量提取商品主图、详情长图、买家秀实拍并保存到本地。适用于「提取抖音商品图片」「下载抖音商品详情图」「这个链接的图保存下来」等需求。
+description: 从抖音商品分享链接（v.douyin.com 短链 / haohuo.jinritemai.com 商品页）提取商品主图、详情长图、买家秀实拍并保存到本地。适用于「提取抖音商品图片」「下载抖音商品详情图」「这个链接的图保存下来」等需求。
 agent_created: true
 ---
 
 # 抖音商品图片提取
 
-从一条抖音商品分享链接里，把**主图轮播**、**详情长图**、**买家秀**三类图片全部扒下来。
+从一条抖音商品分享链接里提取三类图片：**主图轮播**、**详情长图**、**买家秀**。
 
-核心难点在于：抖音商品 H5 是精简版（`partial-detail-wrapper`），**详情图根本不会渲染进 DOM**——但这不代表没有，数据在 `pack/detail` 接口里，只是该接口要 **POST + promotion_id** 才返回。只看 DOM 会得出「网页版没有详情图」的错误结论。
+## 先读这段：可靠性预期
+
+| 图片 | 依赖 | 可靠性 |
+|---|---|---|
+| 主图（5 张，800×800） | 纯 DOM + CDN | ✅ 稳定 |
+| 买家秀（前 5 张，360×480） | 纯 DOM + CDN | ✅ 稳定 |
+| **详情长图（20+ 张，750 宽）** | **回放页面签名接口** | ⚠️ **不稳定** |
+
+详情图那条路本质上是「抢一个新鲜签名」，成败取决于 `msToken` 是否存在、`a_bogus` 是否足够长且没被消耗。**换机器、换 IP、换浏览器 profile 都可能直接失效**，失败时接口返回 `200 + 空 body`（不报错，静默丢包）。
+
+`run.sh` 已内置预热 + 多轮重试，但**不保证成功**。只要主图和买家秀，用 `SKIP_DETAIL=1`，那条路是确定的。
+
+## 为什么详情图这么麻烦（根因）
+
+分享落地页自己的请求是这样的：
+
+```
+POST /aweme/v2/shop/promotion/pack/detail/?is_h5=1&origin_type=detail_share_v2&a_bogus=...
+body: promotion_id=3843019061009187217&enter_from=copy&meta_param=<7KB JSON>
+→ 响应仅 ~903 字节（detail_config / jump_url / 空 detail_imgs）
+```
+
+**关键在 `enter_from=copy` + `meta_param`**：这两个参数告诉服务端「这是一个分享落地页」，于是只返回精简数据。所以页面 DOM 里永远没有「商品图文详情」那一段——不是抓不到，是服务端压根没给。
+
+把 body 换成极简的 `promotion_id=<promotion_id>`，同一个接口会返回 **21KB 完整数据**（实测 21 张详情图）。但这一步要绕过签名校验，于是就有了下面的不稳定。
 
 ## 快速开始
 
 ```bash
 ./scripts/run.sh "https://v.douyin.com/XXXXXX/" ~/Desktop/抖音图片_商品名
-```
 
-跑完得到：
+# 只要主图 + 买家秀（稳）
+SKIP_DETAIL=1 ./scripts/run.sh "https://v.douyin.com/XXXXXX/" ~/Desktop/抖音图片_商品名
+
+# 详情图多试几轮
+MAX_TRY=6 ./scripts/run.sh "https://v.douyin.com/XXXXXX/" ~/Desktop/抖音图片_商品名
+```
 
 ```
 抖音图片_商品名/
 ├── 主图_01~05.jpg
-├── 详情图/详情_01~21.png
+├── 详情图/详情_01~21.png     ← 拿不到时此目录为空
 └── 详情页_买家秀/买家秀_01~05.jpg
 ```
 
-下面是它内部做的事，出问题时按顺序排查。
-
 ## 0. 前置
 
-- `agent-browser`（真实浏览器，处理 JS 渲染与接口签名）
+- `agent-browser`：`npm i -g agent-browser && agent-browser install`
 - `python3`（仅标准库）
-- macOS 的 `sips`（可选，用于 webp / heic → jpg）
+- macOS 的 `sips`（可选，webp / heic → jpg）
 
-## 1. 判定链接类型
+## 1. 链接体检
 
-```bash
-curl -sIL "https://v.douyin.com/XXXX/" -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" --max-time 30 | grep -i location
-```
-
-| 跳转目标 | 类型 |
+| 输入 | 结果 |
 |---|---|
-| `haohuo.jinritemai.com/ecommerce/trade/detail/index.html?...` | **电商商品**（本 skill 场景） |
-| `douyin.com/video/...` / `iesdouyin.com` | 视频，不适用 |
+| `v.douyin.com/xxx` 短链 | ✅ 能用 |
+| `haohuo.jinritemai.com/...&ug_share_id=...&detail_schema=...&alkey=...` 完整长链 | ✅ 能用 |
+| 长链但被裁剪掉 `ug_share_id`/`detail_schema`/`alkey` | ❌ 落到「检测到当前环境存在安全风险」页，只有 53 个字，连 `pack/detail` 都不会发 |
+| `douyin.com/video/...` | ❌ 是视频不是商品 |
 
-从跳转 URL 里取两个 ID：
+`run.sh` 会做这个体检并直接提示，不用浪费一轮。
 
-- `&id=<product_id>` → 商品 ID
-- `promotion_id=<promotion_id>` → **详情接口的钥匙**（可能藏在 `detail_schema` 的双重编码里，`collect.js` 会自动解码解析，兜底还能从 `alkey` 的 `1128_<author>_<item>_<promotion>_011` 第 4 段取）
+**短链变长链**：不需要，也没必要——短链 302 一跳就到长链，`collect.js` 从最终 `location.href` 里解析 `product_id` / `promotion_id`。反过来长链无法还原成短链。
 
-## 2. 打开页面（必须走短链）
+## 2. 预热主站（别省）
 
 ```bash
-agent-browser network requests --clear      # 清掉上一次会话的旧签名
-agent-browser open "https://v.douyin.com/XXXX/"
-agent-browser wait --load load
+agent-browser open "https://www.douyin.com/"
 ```
 
-> **不要直接打开长 URL。** 脱离短链的分享参数会触发「检测到当前环境存在安全风险」，页面只剩 50 来个字。加 `&is_pc=1`、`&is_web=1`、`&show_detail=1` 都救不回来；`--headed` 也不行。
->
-> `network requests --clear` 不能省：旧会话遗留的过期签名会被排进候选列表，回放只会拿到空 body。
+`msToken` 由主站的 JS/cookie 环境产生。**没预热过主站，商品页的请求多半不带 `msToken`，签名回放必然返回空 body。** 这是「换台机器就失败」最常见的原因。
 
-## 3. 抓签名接口地址
+## 3. 抓签名接口
 
 ```bash
 agent-browser network requests --filter "pack/detail" | python3 scripts/build_payload.py
 ```
 
-输出形如 `window.__DY_PACK_URLS__ = ["https://...a_bogus=xxx&msToken=yyy"];`
+`build_payload.py` 干三件事：
 
-两个注意点：
+1. 逐行解析（**不能 `tr -d '\n'`**，多条 URL 会被拼成一个废链接）；
+2. 按签名完整度打分排序：带 `msToken` +4、`a_bogus` 长度 >80 +2、URL 更长 +1；
+3. 输出 `window.__DY_PACK_URLS__` 数组供 `collect.js` 依次重试。
 
-- 同一次加载可能出现**多条** `pack/detail`，其中有的**不带 `msToken`**，回放必然空 body。`build_payload.py` 会把候选全部收齐、带 `msToken` 的排前面，`collect.js` 依次重试直到拿到 JSON。
-- **绝不能用 `sed` 把 URL 注入 JS**。URL 里的 `&` 在 `sed` 替换串中是「整个匹配」的展开符号，会把链接搅碎；正确做法是 JSON 序列化成数组变量，或直接 `cat prelude.js collect.js | agent-browser eval --stdin`。
+**别用 `sed` 把 URL 注入 JS**：`&` 在 sed 替换串里是「整个匹配」展开符，会把链接搅碎。
 
-## 4. 取三类图片
+## 4. 三类图片的取法
 
-```bash
-agent-browser network requests --filter "pack/detail" \
-  | python3 scripts/build_payload.py > /tmp/prelude.js
-cat /tmp/prelude.js scripts/collect.js | agent-browser eval --stdin > raw.json
-```
-
-### 4.1 详情图（关键）
+### 4.1 详情图（不稳定，靠签名）
 
 ```js
 fetch(PACK_URL, {
-  method: 'POST',                        // 必须 POST
+  method: 'POST',                        // GET 一定返回空 body
   credentials: 'include',
   headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-  body: 'promotion_id=' + promotionId    // 必须用 promotion_id
+  body: 'promotion_id=' + promotionId    // 用 product_id → 14001006 参数不合法
 })
 ```
 
-返回 JSON 的 `detail_info.detail_imgs[]` 就是全部详情长图（实测某露营灯 21 张）。
-
-参数对照，别踩：
-
 | 写法 | 结果 |
 |---|---|
-| `POST` + `promotion_id=xxx` | ✅ 正常返回 `detail_imgs` |
-| `POST` + `product_id=xxx` | ❌ `status_code: 14001006 参数不合法` |
-| `POST` + 空 body | ❌ 同上 |
-| `GET`（任意参数） | ❌ 返回空 body（最容易被误判成「接口没数据」） |
+| `POST` + `promotion_id` + 有效签名 | ✅ `detail_info.detail_imgs` |
+| `POST` + `product_id` | ❌ `14001006 参数不合法` |
+| `POST` + 页面原样 body（含 `enter_from=copy`） | ⚠️ 200，但只有 903 字节精简数据 |
+| `GET` | ❌ 空 body |
+| 签名已失效 / 缺 msToken / 短 `a_bogus` | ❌ **200 + 0 字节**，静默丢包 |
 
-### 4.2 主图
+### 4.2 主图（稳定）
 
-主图**不是 `<img>`**，是 CSS 背景图：
+不是 `<img>`，是 CSS 背景图：
 
 ```js
 [...document.querySelectorAll('.head-figure__media-view__content')]
   .map(e => getComputedStyle(e).backgroundImage.match(/url\("(.+)"\)/)[1])
 ```
 
-提取时保留 `ecom-shop-material/` 前缀，和接口 uri 保持同构。轮播指示器写「1/6」但只有 5 张时，多出来那格是**商品视频**，不是漏图。
+正则要保留 `ecom-shop-material/` 前缀，和接口 uri 同构，否则下载器拼出的 URL 会缺一段。轮播显示「1/6」但只有 5 张时，多的那格是**商品视频**。
 
-### 4.3 买家秀
+### 4.3 买家秀（稳定）
 
 ```js
 [...document.querySelectorAll('[class*=buyershow] *')]
@@ -123,40 +134,33 @@ fetch(PACK_URL, {
   .filter(b => b.includes('commentpic'))
 ```
 
-页面通常只渲染前 5 张缩略图，「买家秀 (51)」是评论总数，不是图数。
+页面只渲染前 5 张缩略图，「买家秀 (51)」是评论总数，不是图数。站内跳转（进店逛逛 / 底部「店铺」）都会被「打开抖音APP」拦住，走不出分享落地页，别浪费时间。
 
-## 5. 下载
-
-```bash
-python3 scripts/download_all.py raw.json ~/Desktop/抖音图片_<商品名>
-```
-
-同一份 `<uri>` 换模板即可，各类型最优模板：
+## 5. 下载模板
 
 | 类型 | 模板 | 说明 |
 |---|---|---|
-| 详情图 | `~tplv-5mmsx3fupr-image.png` | **无损 PNG，优先**。首图 1.1MB vs JPEG 154KB，文字边缘明显更净 |
-| 主图 | `~tplv-5mmsx3fupr-resize_q:1080:1080:q90.webp` | 源图仅 800×800，这是最清晰档 |
-| 买家秀 | `~tplv-fceoirpogb-re_cp:360:0:q100.heic` | 只有 360×480，改尺寸或去掉模板一律 403 |
+| 详情图 | `~tplv-5mmsx3fupr-image.png` | **无损 PNG**，1.1MB vs JPEG 154KB，文字边缘更净 |
+| 主图 | `~tplv-5mmsx3fupr-resize_q:1080:1080:q90.webp` | 源图仅 800×800 |
+| 买家秀 | `~tplv-fceoirpogb-re_cp:360:0:q100.heic` | 只有 360×480，改尺寸/去模板一律 403 |
 
-- 裸素材地址（不带 `~tplv-...`）→ **400**
-- 请求必须带 `User-Agent` 和 `Referer: https://haohuo.jinritemai.com/`
-- CDN 节点用 `p26-item.ecombdimg.com` 最稳，`p3-item` / `p9-item` 同源可换
+裸素材地址（不带 `~tplv-...`）→ 400。请求需带 `User-Agent` + `Referer: https://haohuo.jinritemai.com/`。CDN 节点 `p26-item` 最稳。
 
 ## 6. 失败排查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `status=200` 但 body 为空 | **软限流**。同一 IP 短时间内反复回放 `pack/detail` 会被静默丢包 | 停几分钟再试、关掉浏览器换新会话、别对同一链接高频重跑。重跑前务必 `network requests --clear` |
-| `14001006 参数不合法` | 用了 `product_id` / 空 body / `GET` | 改 `POST` + `promotion_id` |
-| `` evaluation error: Invalid or unexpected token `` | URL 里的 `&` 被 shell 或 sed 破坏 | 用 `build_payload.py` + `eval --stdin`，别拼字符串 |
-| 抓不到 `pack/detail` | 短链被风控 / 页面没加载完 / 不是商品页 | 重新打开短链，确认 innerText 里有商品标题 |
-| 页面只有「检测到当前环境存在安全风险」 | 用了长 URL | 换回 `v.douyin.com` 短链 |
+| 页面 53 个字，无 `pack/detail` | 长链被裁剪 / 直连非分享 URL | 换 `v.douyin.com` 短链或完整分享长链 |
+| 200 + 空 body | 签名失效：缺 `msToken` 或短 `a_bogus`(≈44) | 预热主站、`MAX_TRY` 加大、隔几分钟重跑 |
+| `14001006 参数不合法` | 用了 `product_id` / 空 body / GET | 改 `POST` + `promotion_id` |
+| 200 + 903 字节 | 请求带了 `enter_from=copy`，服务端只给精简数据 | 用极简 body |
+| `SyntaxError: Invalid or unexpected token` | URL 里 `&` 被 shell / sed 破坏 | 用 `build_payload.py` + `eval --stdin` |
+| 只有 1 条候选、无 msToken | 没预热主站，或页面还没加载完 | 先开 douyin.com 再进商品页 |
 
 ## 7. 其他坑位
 
-- `agent-browser eval` **支持 await Promise**，可以直接 `fetch(...).then(r=>r.text())`。
-- 页面主体在内部滚动容器里（`.detail-container__body`，内容高度约 1518px），`window.scrollY` 恒为 0，`mouse wheel` 也无效——想整页截图直接 `set viewport 1440 2600`。
-- `agent-browser network request <id>` 只回 URL，不回 body；HAR 录制也不含 body。要 body 只能回放接口。
-- 该版本（0.27.0）没有 `addinitscript` 命令；`open --init-script <path>` 可用。
-- 详情图宽度统一 750，高度不等（实测 308~1630），按接口顺序编号即可，无需拼接。
+- 页面主体在内部滚动容器里（`.detail-container__body`，内容高度约 1518px），`window.scrollY` 恒为 0，`mouse wheel` 也无效；整页截图直接 `set viewport 1440 2600`。
+- `agent-browser network requests` 的输出**可能截断 URL、可能漏 `msToken`**；HAR（`network har start`）里的 URL 是准确的，也是拿到请求 body 的唯一途径（`network request <id>` 只回 URL，不回收/发 body）。
+- `agent-browser eval` 支持 await Promise；带 `&` 的脚本一律 `eval --stdin < file.js`。
+- 该版本（0.27.0）没有 `addinitscript`；`open --init-script <path>` 可用。
+- 详情图宽度统一 750，高度 308~1630 不等，按接口顺序编号即可，不用拼。

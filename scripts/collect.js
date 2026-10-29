@@ -117,7 +117,12 @@
 
   function tryNext(i) {
     if (i >= CANDIDATES.length) {
-      return bail('all_candidates_failed', { tried: tried });
+      return bail('all_candidates_failed', {
+        tried: tried,
+        hint: '所有候选签名回放都拿到空 body。最常见原因：候选 URL 缺 msToken，' +
+              '或 a_bogus 是短签名（约 44 字符）——这类签名只能被页面自己消费一次，无法回放。' +
+              '解决：重新加载页面再抓签名（run.sh 已内置重试），或先访问 douyin.com 让 msToken 生效。'
+      });
     }
     return fetch(CANDIDATES[i], {
       method: 'POST',                       // GET 会返回空 body
