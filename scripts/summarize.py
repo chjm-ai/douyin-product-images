@@ -39,6 +39,16 @@ def main():
     print(f"product_id={d.get('product_id')} promotion_id={d.get('promotion_id')}")
     print(f"主图 {n_main} / 详情图 {n_detail} / 买家秀 {n_bs}")
 
+    # SKU 只能来自完整响应的 product_format / detail_config（DOM 里没有、也没有独立接口）
+    if d.get("has_product_format") or d.get("has_detail_config"):
+        print(f"SKU 源: product_format={bool(d.get('has_product_format'))} "
+              f"detail_config={bool(d.get('has_detail_config'))}")
+        if d.get("product_format"):
+            print(f"  product_format 预览: {d['product_format'][:200]}")
+    elif n_detail:
+        keys = d.get("detail_info_keys") or []
+        print(f"SKU 源: 未找到 product_format/detail_config，响应字段: {keys}")
+
     if n_detail:
         sys.exit(0)
 

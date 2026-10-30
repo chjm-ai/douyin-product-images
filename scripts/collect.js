@@ -147,7 +147,27 @@
           var uri = list[n] && list[n].uri;
           if (uri && detail.indexOf(uri) === -1) detail.push(uri);
         }
-        return build(detail, { candidate_index: i, tried: tried });
+
+        // SKU / 规格：分享落地页的 DOM 里完全没有，只能从完整响应的
+        // product_format / detail_config 里拿。这里不做 schema 假设——
+        // 原样透传，交给下游自己解析（未验证过具体结构）。
+        function dump(o) {
+          if (o == null) return null;
+          try {
+            var s = JSON.stringify(o);
+            return s.length > 20000 ? s.slice(0, 20000) + '…' : s;
+          } catch (e) { return null; }
+        }
+
+        return build(detail, {
+          candidate_index: i,
+          tried: tried,
+          has_product_format: !!info.product_format,
+          has_detail_config: !!info.detail_config,
+          product_format: dump(info.product_format),
+          detail_config: dump(info.detail_config),
+          detail_info_keys: Object.keys(info)
+        });
       })
       .catch(function (e) {
         tried.push({ i: i, code: 'exception', msg: String(e).slice(0, 60) });
